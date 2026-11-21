@@ -1,7 +1,10 @@
 name: Ad-Hoc Sign Sable Dylib
 
 on:
-  workflow_dispatch: # Lets you trigger it manually via a button in GitHub
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   sign:
@@ -15,8 +18,9 @@ jobs:
           codesign --force --sign - libs/sable_rapier_aarch64_macos.dylib
           codesign --verify --verbose=2 libs/sable_rapier_aarch64_macos.dylib
 
-      - name: Downloadable signed dylib
-        uses: actions/upload-artifact@v4
+      - name: Upload raw dylib to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: signed-sable-dylib
-          path: libs/sable_rapier_aarch64_macos.dylib
+          tag_name: signed-dylib
+          name: Signed Sable Dylib
+          files: libs/sable_rapier_aarch64_macos.dylib
