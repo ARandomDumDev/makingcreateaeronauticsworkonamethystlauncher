@@ -1,3 +1,4 @@
+
 name: Sign Sable Native Dylib
 
 on:
@@ -17,7 +18,6 @@ jobs:
         uses: apple-actions/import-codesign-certs@v7
         with:
           p12-file-base64: ${{ secrets.APPLE_CERT_BASE64 }}
-          p12-password: ""
 
       - name: Extract, Patch, Sign Dylib, and Repackage JAR
         run: |
@@ -25,25 +25,25 @@ jobs:
           cd work
           unzip -q ../mods/sable-neoforge-1.21.1-2.0.6.jar
 
-          DYLIB=$(find . -name "sable_rapier_aarch64_macos.dylib")
+          DYLIB=$(find . -name "sable_rapier_aarch64_macos.dylib" -print -quit)
           if [ -z "$DYLIB" ]; then
             echo "Error: Could not find sable_rapier_aarch64_macos.dylib inside the JAR"
             exit 1
           fi
           echo "Found dylib at: $DYLIB"
 
-          # Automatically grab the first valid code-signing identity from the keychain
           IDENTITY=$(security find-identity -v -p codesigning | grep -m 1 '"' | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$IDENTITY" ]; then
+            echo "Error: No valid code-signing identity found"
+            exit 1
+          fi
           echo "Signing with identity: $IDENTITY"
 
-          # Patch platform from macOS (1) to iOS (2) so iPadOS dyld accepts it
           vtool -set-build-version ios 15.0 15.0 -replace -output "$DYLIB" "$DYLIB"
 
-          # Sign the dylib with your certificate
           codesign --force --sign "$IDENTITY" "$DYLIB"
           codesign --verify --verbose=2 "$DYLIB"
 
-          # Repackage into a new JAR
           zip -qr ../sable-neoforge-1.21.1-2.0.6-signed.jar .
 
       - name: Upload Signed JAR to GitHub Release
