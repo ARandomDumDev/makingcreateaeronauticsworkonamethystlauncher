@@ -1,4 +1,4 @@
-name: Ad-Hoc Sign Sable Dylib
+name: Sign Sable Native Dylib
 
 on:
   workflow_dispatch:
@@ -7,20 +7,48 @@ permissions:
   contents: write
 
 jobs:
-  sign:
+  sign-jar:
     runs-on: macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ad-hoc sign dylib
-        run: |
-          codesign --force --sign - libs/sable_rapier_aarch64_macos.dylib
-          codesign --verify --verbose=2 libs/sable_rapier_aarch64_macos.dylib
+      - name: Import Passwordless P12 Certificate
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERT_BASE64 }}
+          p12-password: ""
 
-      - name: Upload raw dylib to GitHub Release
+      - name: Extract, Patch, Sign Dylib, and Repackage JAR
+        run: |
+          mkdir -p work
+          cd work
+          unzip -q ../mods/sable-neoforge-1.21.1-2.0.6.jar
+
+          DYLIB=$(find . -name "sable_rapier_aarch64_macos.dylib")
+          if [ -z "$DYLIB" ]; then
+            echo "Error: Could not find sable_rapier_aarch64_macos.dylib inside the JAR"
+            exit 1
+          fi
+          echo "Found dylib at: $DYLIB"
+
+          # Automatically grab the first valid code-signing identity from the keychain
+          IDENTITY=$(security find-identity -v -p codesigning | grep -m 1 '"' | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Signing with identity: $IDENTITY"
+
+          # Patch platform from macOS (1) to iOS (2) so iPadOS dyld accepts it
+          vtool -set-build-version ios 15.0 15.0 -replace -output "$DYLIB" "$DYLIB"
+
+          # Sign the dylib with your certificate
+          codesign --force --sign "$IDENTITY" "$DYLIB"
+          codesign --verify --verbose=2 "$DYLIB"
+
+          # Repackage into a new JAR
+          zip -qr ../sable-neoforge-1.21.1-2.0.6-signed.jar .
+
+      - name: Upload Signed JAR to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: signed-dylib
-          name: Signed Sable Dylib
-          files: libs/sable_rapier_aarch64_macos.dylib
+          tag_name: signed-sable
+          name: Signed Sable Mod
+          files: sable-neoforge-1.21.1-2.0.6-signed.jar
