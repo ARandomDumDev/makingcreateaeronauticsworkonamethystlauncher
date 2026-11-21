@@ -10,41 +10,104 @@ permissions:
 jobs:
   sign-jar:
     runs-on: macos-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Import Passwordless P12 Certificate
-        uses: apple-actions/import-codesign-certs@v7
-        with:
-          p12-file-base64: ${{ secrets.APPLE_CERT_BASE64 }}
-
       - name: Extract, Patch, Sign Dylib, and Repackage JAR
+        env:
+          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
+        shell: bash
         run: |
-          mkdir -p work
-          cd work
-          unzip -q ../mods/sable-neoforge-1.21.1-2.0.6.jar
+          set -euo pipefail
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing_temp.keychain-db"
+          P12_PATH="$RUNNER_TEMP/apple_certificate.p12"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+
+          cleanup() {
+            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+            rm -f "$P12_PATH"
+          }
+          trap cleanup EXIT
+
+          if [ -z "$APPLE_CERT_BASE64" ]; then
+            echo "Error: APPLE_CERT_BASE64 secret is empty"
+            exit 1
+          fi
+
+          echo "$APPLE_CERT_BASE64" | base64 --decode > "$P12_PATH"
+
+          echo "Creating temporary keychain..."
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+
+          echo "Importing passwordless P12 certificate..."
+          security import "$P12_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          echo "Searching for code-signing identity..."
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk '/valid identities found/ {exit} /"[^"]+"/ {print $2; exit}')
+
+          if [ -z "$IDENTITY" ]; then
+            echo "Error: No valid code-signing identity found in the P12"
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+            exit 1
+          fi
+
+          echo "Found signing identity: $IDENTITY"
+
+          mkdir -p "$GITHUB_WORKSPACE/work"
+          cd "$GITHUB_WORKSPACE/work"
+
+          JAR="$GITHUB_WORKSPACE/mods/sable-neoforge-1.21.1-2.0.6.jar"
+
+          if [ ! -f "$JAR" ]; then
+            echo "Error: Sable JAR not found at $JAR"
+            exit 1
+          fi
+
+          unzip -q "$JAR"
 
           DYLIB=$(find . -name "sable_rapier_aarch64_macos.dylib" -print -quit)
+
           if [ -z "$DYLIB" ]; then
-            echo "Error: Could not find sable_rapier_aarch64_macos.dylib inside the JAR"
+            echo "Error: Could not find sable_rapier_aarch64_macos.dylib"
             exit 1
           fi
-          echo "Found dylib at: $DYLIB"
 
-          IDENTITY=$(security find-identity -v -p codesigning | grep -m 1 '"' | sed -E 's/.*"([^"]+)".*/\1/')
-          if [ -z "$IDENTITY" ]; then
-            echo "Error: No valid code-signing identity found"
-            exit 1
-          fi
-          echo "Signing with identity: $IDENTITY"
+          echo "Found dylib: $DYLIB"
 
-          vtool -set-build-version ios 15.0 15.0 -replace -output "$DYLIB" "$DYLIB"
+          echo "Patching dylib platform metadata..."
+          vtool -set-build-version ios 15.0 15.0 \
+            -replace \
+            -output "$DYLIB" \
+            "$DYLIB"
 
-          codesign --force --sign "$IDENTITY" "$DYLIB"
+          echo "Signing dylib..."
+          codesign --force \
+            --sign "$IDENTITY" \
+            --keychain "$KEYCHAIN_PATH" \
+            "$DYLIB"
+
+          echo "Verifying signature..."
           codesign --verify --verbose=2 "$DYLIB"
 
-          zip -qr ../sable-neoforge-1.21.1-2.0.6-signed.jar .
+          echo "Repackaging signed JAR..."
+          zip -qr "$GITHUB_WORKSPACE/sable-neoforge-1.21.1-2.0.6-signed.jar" .
+
+          echo "Signed JAR created successfully."
 
       - name: Upload Signed JAR to GitHub Release
         uses: softprops/action-gh-release@v2
